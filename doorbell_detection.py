@@ -13,9 +13,9 @@ from time import sleep
 #             1: Poorly sensitive, will only go off for relatively loud
 SENSITIVITY= 1
 # Alarm frequency (Hz) to detect (Set frequencyoutput to True if you need to detect what frequency to use)
-TONE = 3500
+TONE = 3410
 #Bandwidth for detection (i.e., detect frequencies +- within this margin of error of the TONE)
-BANDWIDTH = 30
+BANDWIDTH = 270
 # Each blip is 1/SAMPLE_RATE * NUM_SAMPLES which is approximately 46ms for 44100 Hz with 2048 samples
 #How many 46ms blips before we declare a beep? (Set frequencyoutput to True if you need to determine how many blips are found, then subtract some)
 beeplength=8
