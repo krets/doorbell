@@ -1,95 +1,125 @@
 #!/usr/bin/env python
+import argparse
+import logging
 from datetime import datetime
+import threading
 import pyaudio
 import numpy as np
 from numpy.fft import fft
 from time import sleep
 
-SENSITIVITY = 0.5  # Try different values between 0.1 and 1
-TONE = 3300
-BANDWIDTH = 700  # Increase this if needed
-beeplength = 2  # Reduce this if your doorbell rings are shorter
-alarmlength = 1  # Reduce this if you want faster alarm triggering
-resetlength = 5  # Adjust as needed
-clearlength = 15  # Adjust as needed
-debug = False
-frequencyoutput = True
+LOG = logging.getLogger('krets')
+LOG.addHandler(logging.StreamHandler())
+LOG.handlers[-1].setFormatter(logging.Formatter('%(asctime)s - %(levelname)s :%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
 
-NUM_SAMPLES = 2048
-SAMPLING_RATE = 44100
-pa = pyaudio.PyAudio()
+class AudioAlarmDetector(threading.Thread):
+    def __init__(self, sensitivity=0.5, tone=3300, bandwidth=700, beeplength=2,
+                 alarmlength=1, resetlength=5, clearlength=15,
+                 num_samples=2048, sampling_rate=44100, input_device_index=1):
+        super().__init__()
+        self.sensitivity = sensitivity
+        self.tone = tone
+        self.bandwidth = bandwidth
+        self.beeplength = beeplength
+        self.alarmlength = alarmlength
+        self.resetlength = resetlength
+        self.clearlength = clearlength
+        self.num_samples = num_samples
+        self.sampling_rate = sampling_rate
+        self.input_device_index = input_device_index
+        self.blipcount = 0
+        self.beepcount = 0
+        self.resetcount = 0
+        self.clearcount = 0
+        self.alarm = False
+        self.pa = pyaudio.PyAudio()
+        self.stream = self.pa.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=self.sampling_rate,
+            input=True,
+            frames_per_buffer=4096,
+            input_device_index=self.input_device_index
+        )
 
-# List Devices
-for i in range(pa.get_device_count()):
-    print(pa.get_device_info_by_index(i))
-
-_stream = pa.open(format=pyaudio.paInt16,
-                  channels=1,
-                  rate=SAMPLING_RATE,
-                  input=True,
-                  frames_per_buffer=4096,
-                  input_device_index=1)
-
-print("Alarm detector working. Press CTRL-C to quit.")
-
-blipcount = 0
-beepcount = 0
-resetcount = 0
-clearcount = 0
-alarm = False
-
-try:
-    while True:
-        while _stream.get_read_available() < NUM_SAMPLES:
+    def detect_audio(self):
+        while self.stream.get_read_available() < self.num_samples:
             sleep(0.01)
-        audio_data = np.frombuffer(_stream.read(
-            _stream.get_read_available()), dtype=np.int16)[-NUM_SAMPLES:]
+
+        audio_data = np.frombuffer(self.stream.read(self.stream.get_read_available()), dtype=np.int16)[-self.num_samples:]
         normalized_data = audio_data / 32768.0
-        intensity = abs(fft(normalized_data))[:NUM_SAMPLES//2]
-        frequencies = np.linspace(0.0, float(SAMPLING_RATE)/2, num=int(NUM_SAMPLES/2))
+        intensity = abs(fft(normalized_data))[:self.num_samples // 2]
+        frequencies = np.linspace(0.0, float(self.sampling_rate) / 2, num=int(self.num_samples / 2))
 
-        if frequencyoutput:
-            which = intensity[1:].argmax() + 1
-            if which != len(intensity) - 1:
-                y0, y1, y2 = np.log(intensity[which-1:which+2:])
-                x1 = (y2 - y0) * .5 / (2 * y1 - y2 - y0)
-                thefreq = (which + x1) * SAMPLING_RATE / NUM_SAMPLES
-            else:
-                thefreq = which * SAMPLING_RATE / NUM_SAMPLES
-            if debug: print("\t\t\t\tfreq=", thefreq)
+        which = intensity[1:].argmax() + 1
+        thefreq = ((which * self.sampling_rate) / self.num_samples if which == len(intensity) - 1 else
+                   ((which + (0.5 * (np.log(intensity[which + 1]) - np.log(intensity[which - 1])) /
+                             (2 * np.log(intensity[which]) - np.log(intensity[which + 1]) - np.log(intensity[which - 1]))))
+                    * self.sampling_rate) / self.num_samples)
 
-        if max(intensity[(frequencies < TONE+BANDWIDTH) & (frequencies > TONE-BANDWIDTH)]) > max(intensity[(frequencies < TONE-1000) & (frequencies > TONE-2000)]) + SENSITIVITY:
-            blipcount += 1
-            resetcount = 0
-            if debug: print("\t\tBlip", blipcount)
-            if blipcount >= beeplength:
-                blipcount = 0
-                resetcount = 0
-                beepcount += 1
-                if debug: print("\tBeep", beepcount)
-                if beepcount >= alarmlength and not alarm:
-                    clearcount = 0
-                    alarm = True
-                    print("Alarm!", datetime.now())
-                    beepcount = 0
+        LOG.debug(f"Detected frequency: {thefreq}")
+
+        if max(intensity[(frequencies < self.tone + self.bandwidth) & (frequencies > self.tone - self.bandwidth)]) > max(intensity[(frequencies < self.tone - 1000) & (frequencies > self.tone - 2000)]) + self.sensitivity:
+            self.blipcount += 1
+            self.resetcount = 0
+            LOG.debug(f"Blip count: {self.blipcount}")
+            if self.blipcount >= self.beeplength:
+                self.blipcount = 0
+                self.beepcount += 1
+                LOG.debug(f"Beep count: {self.beepcount}")
+                if self.beepcount >= self.alarmlength and not self.alarm:
+                    self.clearcount = 0
+                    self.alarm = True
+                    LOG.info(f"Alarm triggered at {datetime.now()}")
+                    self.beepcount = 0
         else:
-            blipcount = 0
-            resetcount += 1
-            if debug: print("\t\t\treset", resetcount)
-            if resetcount >= resetlength:
-                resetcount = 0
-                beepcount = 0
-                if alarm:
-                    clearcount += 1
-                    if debug: print("\t\tclear", clearcount)
-                    if clearcount >= clearlength:
-                        clearcount = 0
-                        print("Cleared alarm!")
-                        alarm = False
-        sleep(0.01)
-except KeyboardInterrupt:
-    print("User interrupted the operation.")
-finally:
-    _stream.stop_stream()
-    _stream.close()
-    pa.terminate()
+            self.blipcount = 0
+            self.resetcount += 1
+            LOG.debug(f"Reset count: {self.resetcount}")
+            if self.resetcount >= self.resetlength:
+                self.resetcount = 0
+                self.beepcount = 0
+                if self.alarm:
+                    self.clearcount += 1
+                    LOG.debug(f"Clear count: {self.clearcount}")
+                    if self.clearcount >= self.clearlength:
+                        self.alarm = False
+                        LOG.info("Alarm cleared")
+
+    def run(self):
+        LOG.info("Audio alarm detector started")
+        try:
+            while True:
+                self.detect_audio()
+                sleep(0.01)
+        except KeyboardInterrupt:
+            LOG.info("Audio detection stopped by user")
+        finally:
+            self.stream.stop_stream()
+            self.stream.close()
+            self.pa.terminate()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser('Doobell Detector')
+    parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('-d', '--debug', action='store_true')
+    parser.add_argument('-i', '--input-index', type=int, default=1)
+    return parser.parse_args()
+
+
+
+def main():
+    args = parse_args()
+    level = logging.WARNING
+    if args.debug:
+        level = logging.DEBUG
+    if args.verbose:
+        level = logging.INFO
+    LOG.setLevel(level)
+    detector = AudioAlarmDetector(input_device_index=args.input_index)
+    detector.start()
+
+
+if __name__ == "__main__":
+    main()
