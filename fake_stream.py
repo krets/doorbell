@@ -4,7 +4,6 @@ import os
 
 WAVE_FILES_DIRECTORY = 'audio_samples'
 
-2
 def list_wave_files(directory):
     return [f for f in os.listdir(directory) if f.endswith('.wav')]
 

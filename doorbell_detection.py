@@ -7,16 +7,77 @@ import pyaudio
 import numpy as np
 from numpy.fft import fft
 from time import sleep
+import os
+import requests
+import dotenv
+import time
+
+dotenv.load_dotenv()
 
 LOG = logging.getLogger('krets')
 LOG.addHandler(logging.StreamHandler())
 LOG.handlers[-1].setFormatter(logging.Formatter('%(asctime)s - %(levelname)s :%(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+
+
+class Blinker(threading.Thread):
+    def __init__(self, event, stop_event):
+        super().__init__()
+        self.event = event
+        self.stop_event = stop_event
+        self.light_id = os.getenv("LIGHT_ID")
+        username = os.environ.get('HUE_USERNAME')
+        address = os.environ.get('HUE_ADDRESS')
+        self.base_path = f'http://{address}/api/{username}'
+
+
+    def run(self):
+        while not self.stop_event.is_set():
+            LOG.debug("%s: Waiting for event", self.__class__.__name__)
+            self.event.wait()  # Wait for the event
+            if self.event.is_set():
+                LOG.debug("%s: event set", self.__class__.__name__)
+                self.blink_light()
+                self.event.clear()
+        LOG.debug("%s: stop_event received", self.__class__.__name__)
+
+
+    def blink_light(self, blinks=5, period=0.3):
+        endpoint = f'{self.base_path}/lights/{self.light_id}'
+        data = requests.get(endpoint).json()
+        remembered_state = data['state']
+
+        red = {
+            'on': True,
+            'bri': 255,
+            'hue': 255,
+            'sat': 255,
+            'colormode': 'hs',
+            'transitiontime': 0
+        }
+        off = {
+            'on': False,
+            'transitiontime': 0
+        }
+        remembered_state['transitiontime'] = 0
+        for _ in range(blinks):
+            for state in [red, off]:
+                requests.put(endpoint + '/state', json=state)
+                time.sleep(period)
+        requests.put(endpoint + '/state', json=remembered_state)
+
 
 class AudioAlarmDetector(threading.Thread):
     def __init__(self, sensitivity=0.5, tone=3300, bandwidth=700, beeplength=2,
                  alarmlength=1, resetlength=5, clearlength=15,
                  num_samples=2048, sampling_rate=44100, input_device_index=1):
         super().__init__()
+
+        self.alarm_event = threading.Event()
+        self.stop_event = threading.Event()
+
+        self.blinker = Blinker(self.alarm_event, self.stop_event)
+        self.blinker.start()
+
         self.sensitivity = sensitivity
         self.tone = tone
         self.bandwidth = bandwidth
@@ -70,6 +131,7 @@ class AudioAlarmDetector(threading.Thread):
                 if self.beepcount >= self.alarmlength and not self.alarm:
                     self.clearcount = 0
                     self.alarm = True
+                    self.alarm_event.set()
                     LOG.info(f"Alarm triggered at {datetime.now()}")
                     self.beepcount = 0
         else:
@@ -95,6 +157,7 @@ class AudioAlarmDetector(threading.Thread):
         except KeyboardInterrupt:
             LOG.info("Audio detection stopped by user")
         finally:
+            self.stop_event.set()
             self.stream.stop_stream()
             self.stream.close()
             self.pa.terminate()
