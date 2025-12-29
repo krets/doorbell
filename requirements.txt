@@ -3,5 +3,5 @@ numpy
 matplotlib
 pyaudio
 scipy
-python-deotenv
+python-dotenv
 requests

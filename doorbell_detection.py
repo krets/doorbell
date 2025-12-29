@@ -71,7 +71,7 @@ class Blinker(threading.Thread):
 
 class AudioAlarmDetector(threading.Thread):
     def __init__(
-            self, sensitivity=0.5, tone=3300, bandwidth=100, sustain_ms=400,
+            self, sensitivity=0.5, tone=3678, bandwidth=100, sustain_ms=400,
             sampling_rate=44100, num_samples=2048, input_device_name=None):
 
         super().__init__()
@@ -99,9 +99,12 @@ class AudioAlarmDetector(threading.Thread):
         input_device_index = 1
         for i in range(self.pa.get_device_count()):
             dev_info = self.pa.get_device_info_by_index(i)
-            if input_device_name in dev_info.get('name', ''):
+            if input_device_name and input_device_name in dev_info.get('name', ''):
+                LOG.info("Found device: %s", dev_info)
                 input_device_index = i
                 break
+        else:
+            LOG.warning("Could not find device index for input name: %s", input_device_name)
 
         self.stream = self.pa.open(
             format=pyaudio.paInt16,
@@ -163,6 +166,32 @@ class AudioAlarmDetector(threading.Thread):
             if self.alarm_active and self.consecutive_hits == 0:
                 self.alarm_active = False
 
+    def process_frame(self, raw_data):
+        """Refactored logic from detect_audio to accept external data"""
+        audio_data = np.frombuffer(raw_data, dtype=np.int16)
+        normalized_data = audio_data / 32768.0
+        windowed_data = normalized_data * np.hanning(len(normalized_data))
+
+        mags = abs(fft(windowed_data))[:self.num_samples // 2]
+        freqs = np.fft.fftfreq(self.num_samples, 1 / self.sampling_rate)[:self.num_samples // 2]
+
+        peak_idx = mags.argmax()
+        peak_freq = freqs[peak_idx]
+        peak_mag = mags[peak_idx]
+
+        mask = (freqs < self.tone - self.bandwidth) | (freqs > self.tone + self.bandwidth)
+        noise_floor = np.mean(mags[mask]) if any(mask) else 0.1
+
+        freq_match = abs(peak_freq - self.tone) < (self.bandwidth / 2)
+        signal_strength = peak_mag > (noise_floor + self.sensitivity)
+
+        if freq_match and signal_strength:
+            self.consecutive_hits += 1
+            return True, peak_freq, peak_mag
+
+        self.consecutive_hits = 0
+        return False, peak_freq, peak_mag
+
 def parse_args():
     parser = argparse.ArgumentParser('Doobell Detector')
     parser.add_argument('-v', '--verbose', action='store_true')
@@ -191,7 +220,7 @@ def main():
         time.sleep(1)
         blinker.stop_event.set()
     else:
-        detector = AudioAlarmDetector(input_device_name=args.input_index)
+        detector = AudioAlarmDetector(input_device_name=args.input_name)
         detector.start()
 
 

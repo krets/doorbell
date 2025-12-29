@@ -1,78 +1,45 @@
-import librosa
+import wave
 import numpy as np
-import scipy.signal
-
-audio_samples = [
-    "audio_samples/doorbell01.wav",
-    "audio_samples/doorbell02.wav",
-    "C:/Users/jesse/Downloads/test.wav"
-]
-def analyze_doorbell(audio_path):
-    """Analyze audio file for frequency, volume, duration, and number of beeps."""
-
-    # Load audio file
-    y, sr = librosa.load(audio_path)
-
-    # Calculate duration
-    duration = librosa.get_duration(y=y, sr=sr)
-
-    # Calculate volume (RMS)
-    rms_volume = np.sqrt(np.mean(y ** 2))
-
-    # Detect frequency using Short-Time Fourier Transform (STFT)
-    S = np.abs(librosa.stft(y))
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=S.shape[0])
-    dominant_freq_idx = np.argmax(S, axis=0)
-    dominant_frequency = freqs[dominant_freq_idx]
-    mean_dominant_frequency = np.mean(dominant_frequency)
-
-    # Detect number of beeps using onset detection
-    onset_frames = librosa.onset.onset_detect(y=y, sr=sr)
-    number_of_beeps = len(onset_frames)
-
-    return {
-        'duration': duration,
-        'volume': rms_volume,
-        'average_frequency': mean_dominant_frequency,
-        'number_of_beeps': number_of_beeps
-    }
+import os
 
 
-def detect_doorbell(
-    audio_sample,
-    known_duration=1.2,
-    known_volume=0.0019,
-    freq_tolerance=5150,
-    expected_beeps=8,
-    volume_tolerance=0.001,  # Adjusted tolerance
-    freq_similarity=700,     # Adjusted tolerance
-    beep_tolerance=2):       # Adjusted tolerance
-    """Determine if the audio sample matches the known doorbell characteristics."""
+def analyze_sample(file_path):
+    print(f"\n--- Analyzing: {file_path} ---")
+    if not os.path.exists(file_path):
+        print("Error: File not found.")
+        return
 
-    # Load audio file
-    y, sr = librosa.load(audio_sample)
+    with wave.open(file_path, 'rb') as wf:
+        params = wf.getparams()
+        sampling_rate = params.framerate
+        n_frames = params.nframes
 
-    # Calculate properties
-    duration = librosa.get_duration(y=y, sr=sr)
-    rms_volume = np.sqrt(np.mean(y ** 2))
-    S = np.abs(librosa.stft(y))
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=S.shape[0])
-    dominant_freq_idx = np.argmax(S, axis=0)
-    dominant_frequency = freqs[dominant_freq_idx]
-    mean_dominant_frequency = np.mean(dominant_frequency)
-    onset_frames = librosa.onset.onset_detect(y=y, sr=sr)
-    number_of_beeps = len(onset_frames)
+        # Read all data and convert to float
+        raw_data = wf.readframes(n_frames)
+        audio_data = np.frombuffer(raw_data, dtype=np.int16)
 
-    # Check similarities
-    is_duration_similar = abs(duration - known_duration) < 0.2
-    is_volume_similar = abs(rms_volume - known_volume) < volume_tolerance
-    is_frequency_similar = abs(mean_dominant_frequency - freq_tolerance) < freq_similarity
-    is_beep_count_similar = abs(number_of_beeps - expected_beeps) <= beep_tolerance
+        # If stereo, take only one channel
+        if params.nchannels > 1:
+            audio_data = audio_data[::params.nchannels]
 
-    return is_duration_similar and is_volume_similar and is_frequency_similar and is_beep_count_similar
-# Analyze each sample
-for sample in audio_samples:
-    analysis = analyze_doorbell(sample)
-    print(f"Analysis for {sample}:")
-    print(analysis)
-    print(detect_doorbell(sample))
+        # Normalize
+        normalized = audio_data / 32768.0
+
+        # Perform FFT
+        n = len(normalized)
+        mags = np.abs(np.fft.rfft(normalized))
+        freqs = np.fft.rfftfreq(n, 1 / sampling_rate)
+
+        # Find top 5 peaks
+        indices = np.argsort(mags)[-5:][::-1]
+
+        print(f"Sampling Rate: {sampling_rate} Hz")
+        print(f"Detected Peaks (Frequency: Magnitude):")
+        for idx in indices:
+            print(f"  - {freqs[idx]:.2f} Hz : {mags[idx]:.4f}")
+
+
+if __name__ == "__main__":
+    samples = ['audio_samples/doorbell01.wav', 'audio_samples/doorbell02.wav']
+    for s in samples:
+        analyze_sample(s)
