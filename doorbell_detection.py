@@ -33,15 +33,15 @@ class Blinker(threading.Thread):
     def run(self):
         while not self.stop_event.is_set():
             LOG.debug("%s: Waiting for event", self.__class__.__name__)
-            self.event.wait()  # Wait for the event
+            self.event.wait(timeout=1)
             if self.event.is_set():
-                LOG.debug("%s: event set", self.__class__.__name__)
-                self.blink_light()
                 self.event.clear()
+                LOG.debug("%s: event received", self.__class__.__name__)
+                self.blink_light()
+
         LOG.debug("%s: stop_event received", self.__class__.__name__)
 
-
-    def blink_light(self, blinks=5, period=0.3):
+    def blink_light(self, blinks=4, period=0.4):
         endpoint = f'{self.base_path}/lights/{self.light_id}'
         data = requests.get(endpoint).json()
         remembered_state = data['state']
@@ -59,10 +59,15 @@ class Blinker(threading.Thread):
             'transitiontime': 0
         }
         remembered_state['transitiontime'] = 0
+        start_time = time.monotonic()
         for _ in range(blinks):
             for state in [red, off]:
+                LOG.debug("%s: blink_light state: %s", self.__class__.__name__, state)
                 requests.put(endpoint + '/state', json=state)
-                time.sleep(period)
+                while time.monotonic() - start_time < period:
+                    pass
+                start_time = time.monotonic()
+        LOG.debug("%s: restore: %s", self.__class__.__name__, remembered_state)
         requests.put(endpoint + '/state', json=remembered_state)
 
 
@@ -107,18 +112,29 @@ class AudioAlarmDetector(threading.Thread):
         while self.stream.get_read_available() < self.num_samples:
             sleep(0.01)
 
-        audio_data = np.frombuffer(self.stream.read(self.stream.get_read_available()), dtype=np.int16)[-self.num_samples:]
+        audio_data = np.frombuffer(self.stream.read(self.stream.get_read_available()), dtype=np.int16)[
+                     -self.num_samples:]
         normalized_data = audio_data / 32768.0
         intensity = abs(fft(normalized_data))[:self.num_samples // 2]
-        frequencies = np.linspace(0.0, float(self.sampling_rate) / 2, num=int(self.num_samples / 2))
+        frequencies = np.linspace(0.0, float(self.sampling_rate) / 2, num=self.num_samples // 2)
 
-        which = intensity[1:].argmax() + 1
-        thefreq = ((which * self.sampling_rate) / self.num_samples if which == len(intensity) - 1 else
-                   ((which + (0.5 * (np.log(intensity[which + 1]) - np.log(intensity[which - 1])) /
-                             (2 * np.log(intensity[which]) - np.log(intensity[which + 1]) - np.log(intensity[which - 1]))))
-                    * self.sampling_rate) / self.num_samples)
+        highest_intensity_index = intensity[1:].argmax() + 1
+        epsilon = 1e-10
+        intensity += epsilon  # Add epsilon to prevent log(0)
 
-        LOG.debug(f"Detected frequency: {thefreq}")
+        if highest_intensity_index == len(intensity) - 1:
+            the_frequency = (highest_intensity_index * self.sampling_rate) / self.num_samples
+        else:
+            log_intensity = np.log(intensity)
+            numerator = log_intensity[highest_intensity_index + 1] - log_intensity[highest_intensity_index - 1]
+            denominator = 2 * log_intensity[highest_intensity_index] - log_intensity[highest_intensity_index + 1] - log_intensity[highest_intensity_index - 1]
+            if denominator == 0:
+                the_frequency = (highest_intensity_index * self.sampling_rate) / self.num_samples
+            else:
+                delta = 0.5 * numerator / denominator
+                the_frequency = ((highest_intensity_index + delta) * self.sampling_rate) / self.num_samples
+
+        LOG.debug(f"Detected frequency: {the_frequency}")
 
         if max(intensity[(frequencies < self.tone + self.bandwidth) & (frequencies > self.tone - self.bandwidth)]) > max(intensity[(frequencies < self.tone - 1000) & (frequencies > self.tone - 2000)]) + self.sensitivity:
             self.blipcount += 1
@@ -153,7 +169,6 @@ class AudioAlarmDetector(threading.Thread):
         try:
             while True:
                 self.detect_audio()
-                sleep(0.01)
         except KeyboardInterrupt:
             LOG.info("Audio detection stopped by user")
         finally:
@@ -168,6 +183,7 @@ def parse_args():
     parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('-d', '--debug', action='store_true')
     parser.add_argument('-i', '--input-index', type=int, default=1)
+    parser.add_argument('--test-blink', action='store_true')
     return parser.parse_args()
 
 
@@ -180,8 +196,18 @@ def main():
     if args.verbose:
         level = logging.INFO
     LOG.setLevel(level)
-    detector = AudioAlarmDetector(input_device_index=args.input_index)
-    detector.start()
+
+    if args.test_blink:
+        logging.basicConfig(level=logging.DEBUG)
+        blinker = Blinker(threading.Event(), threading.Event())
+        blinker.start()
+        time.sleep(1)
+        blinker.event.set()
+        time.sleep(1)
+        blinker.stop_event.set()
+    else:
+        detector = AudioAlarmDetector(input_device_index=args.input_index)
+        detector.start()
 
 
 if __name__ == "__main__":
