@@ -72,7 +72,8 @@ class Blinker(threading.Thread):
 class AudioAlarmDetector(threading.Thread):
     def __init__(
             self, sensitivity=0.5, tone=3300, bandwidth=100, sustain_ms=400,
-            input_device_index=1, sampling_rate=44100, num_samples=2048):
+            sampling_rate=44100, num_samples=2048, input_device_name=None):
+
         super().__init__()
         self.alarm_event = threading.Event()
         self.stop_event = threading.Event()
@@ -92,16 +93,23 @@ class AudioAlarmDetector(threading.Thread):
 
         self.consecutive_hits = 0
         self.alarm_active = False
-        self.input_device_index = input_device_index
 
         self.pa = pyaudio.PyAudio()
+
+        input_device_index = 1
+        for i in range(self.pa.get_device_count()):
+            dev_info = self.pa.get_device_info_by_index(i)
+            if input_device_name in dev_info.get('name', ''):
+                input_device_index = i
+                break
+
         self.stream = self.pa.open(
             format=pyaudio.paInt16,
             channels=1,
             rate=self.sampling_rate,
             input=True,
             frames_per_buffer=self.num_samples,  # Matches read size for efficiency
-            input_device_index=self.input_device_index
+            input_device_index=input_device_index
         )
 
     def detect_audio(self):
@@ -159,7 +167,7 @@ def parse_args():
     parser = argparse.ArgumentParser('Doobell Detector')
     parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('-d', '--debug', action='store_true')
-    parser.add_argument('-i', '--input-index', type=int, default=1)
+    parser.add_argument('-i', '--input-name', type=str, default="hw:1,0")
     parser.add_argument('--test-blink', action='store_true')
     return parser.parse_args()
 
@@ -183,7 +191,7 @@ def main():
         time.sleep(1)
         blinker.stop_event.set()
     else:
-        detector = AudioAlarmDetector(input_device_index=args.input_index)
+        detector = AudioAlarmDetector(input_device_name=args.input_index)
         detector.start()
 
 
