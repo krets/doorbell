@@ -37,9 +37,8 @@ class Blinker(threading.Thread):
     def blink_light(self, blinks=4, period=0.5):
         endpoint = f'{self.base_path}/lights/{self.light_id}'
         try:
-            # Capture state once
             res = requests.get(endpoint).json()
-            orig_state = res['state']
+            orig_state = res.get('state', {})
 
             red = {'on': True, 'bri': 255, 'hue': 0, 'sat': 255, 'transitiontime': 0}
             off = {'on': False, 'transitiontime': 0}
@@ -50,15 +49,11 @@ class Blinker(threading.Thread):
                 requests.put(f"{endpoint}/state", json=off)
                 time.sleep(period)
 
-            # Restore original state (on/off and color)
             LOG.info("Blinker: Restoring original state")
-            restore = {'on': orig_state['on'], 'transitiontime': 0}
-            if 'bri' in orig_state:
-                restore['bri'] = orig_state['bri']
-            if 'hue' in orig_state:
-                restore['hue'] = orig_state['hue']
-            if 'sat' in orig_state:
-                restore['sat'] = orig_state['sat']
+            restore = {'on': orig_state.get('on', True), 'transitiontime': 0}
+            for key in ['bri', 'hue', 'sat']:
+                if key in orig_state:
+                    restore[key] = orig_state[key]
 
             requests.put(f"{endpoint}/state", json=restore)
         except Exception as e:
@@ -78,12 +73,13 @@ class AudioAlarmDetector(threading.Thread):
 
         self.consecutive_hits = 0
         self.last_trigger_time = 0
-        self.lockout_period = 6.0  # Seconds to wait before allowing another trigger
+        self.lockout_period = 6.0
 
         self.pa = pyaudio.PyAudio()
         idx = 1
         for i in range(self.pa.get_device_count()):
-            if input_device_name in self.pa.get_device_info_by_index(i).get('name', ''):
+            dev = self.pa.get_device_info_by_index(i)
+            if input_device_name in dev.get('name', ''):
                 idx = i;
                 break
 
@@ -103,7 +99,6 @@ class AudioAlarmDetector(threading.Thread):
                    :self.num_samples // 2]
             freqs = np.fft.fftfreq(self.num_samples, 1 / self.sampling_rate)[:self.num_samples // 2]
 
-            # High-pass filter check
             audible_mask = freqs > 500
             peak_idx = mags[audible_mask].argmax()
             peak_freq = freqs[audible_mask][peak_idx]
@@ -123,15 +118,12 @@ class AudioAlarmDetector(threading.Thread):
             else:
                 self.consecutive_hits = 0
 
-            # Trigger logic with lockout
             if self.consecutive_hits >= self.required_consecutive:
                 now = time.time()
                 if (now - self.last_trigger_time) > self.lockout_period:
                     LOG.warning("🔔 DOORBELL DETECTED")
                     self.alarm_event.set()
                     self.last_trigger_time = now
-                else:
-                    LOG.debug("Detection ignored (lockout active)")
                 self.consecutive_hits = 0
 
         except Exception as e:
@@ -141,10 +133,17 @@ class AudioAlarmDetector(threading.Thread):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-d', '--debug', action='store_true')
+    parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('-i', '--input-name', type=str, default="hw:1,0")
     args = parser.parse_args()
 
-    LOG.setLevel(logging.DEBUG if args.debug else logging.INFO)
+    if args.debug:
+        LOG.setLevel(logging.DEBUG)
+    elif args.verbose:
+        LOG.setLevel(logging.INFO)
+    else:
+        LOG.setLevel(logging.WARNING)
+
     detector = AudioAlarmDetector(input_device_name=args.input_name)
     detector.start()
     try:
