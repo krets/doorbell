@@ -1,12 +1,10 @@
 #!/usr/bin/env python
 import argparse
 import logging
-from datetime import datetime
 import threading
 import pyaudio
 import numpy as np
 from numpy.fft import fft
-from time import sleep
 import os
 import requests
 import dotenv
@@ -72,111 +70,90 @@ class Blinker(threading.Thread):
 
 
 class AudioAlarmDetector(threading.Thread):
-    def __init__(self, sensitivity=0.5, tone=3300, bandwidth=700, beeplength=2,
-                 alarmlength=1, resetlength=5, clearlength=15,
-                 num_samples=2048, sampling_rate=44100, input_device_index=1):
+    def __init__(
+            self, sensitivity=0.5, tone=3300, bandwidth=100, sustain_ms=400,
+            input_device_index=1, sampling_rate=44100, num_samples=2048):
         super().__init__()
-
         self.alarm_event = threading.Event()
         self.stop_event = threading.Event()
-
         self.blinker = Blinker(self.alarm_event, self.stop_event)
         self.blinker.start()
 
-        self.sensitivity = sensitivity
+        # Configuration
         self.tone = tone
         self.bandwidth = bandwidth
-        self.beeplength = beeplength
-        self.alarmlength = alarmlength
-        self.resetlength = resetlength
-        self.clearlength = clearlength
-        self.num_samples = num_samples
+        self.sensitivity = sensitivity
         self.sampling_rate = sampling_rate
+        self.num_samples = num_samples
+
+        # Timing: How many consecutive frames must match to trigger
+        frame_duration_ms = (num_samples / sampling_rate) * 1000
+        self.required_consecutive = int(sustain_ms / frame_duration_ms)
+
+        self.consecutive_hits = 0
+        self.alarm_active = False
         self.input_device_index = input_device_index
-        self.blipcount = 0
-        self.beepcount = 0
-        self.resetcount = 0
-        self.clearcount = 0
-        self.alarm = False
+
         self.pa = pyaudio.PyAudio()
         self.stream = self.pa.open(
             format=pyaudio.paInt16,
             channels=1,
             rate=self.sampling_rate,
             input=True,
-            frames_per_buffer=4096,
+            frames_per_buffer=self.num_samples,  # Matches read size for efficiency
             input_device_index=self.input_device_index
         )
 
     def detect_audio(self):
-        while self.stream.get_read_available() < self.num_samples:
-            sleep(0.01)
-
-        audio_data = np.frombuffer(self.stream.read(self.stream.get_read_available()), dtype=np.int16)[
-                     -self.num_samples:]
-        normalized_data = audio_data / 32768.0
-        intensity = abs(fft(normalized_data))[:self.num_samples // 2]
-        frequencies = np.linspace(0.0, float(self.sampling_rate) / 2, num=self.num_samples // 2)
-
-        highest_intensity_index = intensity[1:].argmax() + 1
-        epsilon = 1e-10
-        intensity += epsilon  # Add epsilon to prevent log(0)
-
-        if highest_intensity_index == len(intensity) - 1:
-            the_frequency = (highest_intensity_index * self.sampling_rate) / self.num_samples
-        else:
-            log_intensity = np.log(intensity)
-            numerator = log_intensity[highest_intensity_index + 1] - log_intensity[highest_intensity_index - 1]
-            denominator = 2 * log_intensity[highest_intensity_index] - log_intensity[highest_intensity_index + 1] - log_intensity[highest_intensity_index - 1]
-            if denominator == 0:
-                the_frequency = (highest_intensity_index * self.sampling_rate) / self.num_samples
-            else:
-                delta = 0.5 * numerator / denominator
-                the_frequency = ((highest_intensity_index + delta) * self.sampling_rate) / self.num_samples
-
-        LOG.debug(f"Detected frequency: {the_frequency}")
-
-        if max(intensity[(frequencies < self.tone + self.bandwidth) & (frequencies > self.tone - self.bandwidth)]) > max(intensity[(frequencies < self.tone - 1000) & (frequencies > self.tone - 2000)]) + self.sensitivity:
-            self.blipcount += 1
-            self.resetcount = 0
-            LOG.debug(f"Blip count: {self.blipcount}")
-            if self.blipcount >= self.beeplength:
-                self.blipcount = 0
-                self.beepcount += 1
-                LOG.debug(f"Beep count: {self.beepcount}")
-                if self.beepcount >= self.alarmlength and not self.alarm:
-                    self.clearcount = 0
-                    self.alarm = True
-                    self.alarm_event.set()
-                    LOG.info(f"Alarm triggered at {datetime.now()}")
-                    self.beepcount = 0
-        else:
-            self.blipcount = 0
-            self.resetcount += 1
-            LOG.debug(f"Reset count: {self.resetcount}")
-            if self.resetcount >= self.resetlength:
-                self.resetcount = 0
-                self.beepcount = 0
-                if self.alarm:
-                    self.clearcount += 1
-                    LOG.debug(f"Clear count: {self.clearcount}")
-                    if self.clearcount >= self.clearlength:
-                        self.alarm = False
-                        LOG.info("Alarm cleared")
-
-    def run(self):
-        LOG.info("Audio alarm detector started")
+        # Blocking read eliminates the need for sleep() and reduces jitter
         try:
-            while True:
-                self.detect_audio()
-        except KeyboardInterrupt:
-            LOG.info("Audio detection stopped by user")
-        finally:
-            self.stop_event.set()
-            self.stream.stop_stream()
-            self.stream.close()
-            self.pa.terminate()
+            raw_data = self.stream.read(self.num_samples, exception_on_overflow=False)
+        except Exception as e:
+            LOG.error(f"Stream read error: {e}")
+            return
 
+        audio_data = np.frombuffer(raw_data, dtype=np.int16)
+        normalized_data = audio_data / 32768.0
+
+        # Apply Hanning window to reduce spectral leakage from noise/clinks
+        windowed_data = normalized_data * np.hanning(len(normalized_data))
+
+        # FFT and Frequency Calculation
+        mags = abs(fft(windowed_data))[:self.num_samples // 2]
+        freqs = np.fft.fftfreq(self.num_samples, 1 / self.sampling_rate)[:self.num_samples // 2]
+
+        peak_idx = mags.argmax()
+        peak_freq = freqs[peak_idx]
+        peak_mag = mags[peak_idx]
+
+        # Calculate Noise Floor (average magnitude excluding the target band)
+        mask = (freqs < self.tone - self.bandwidth) | (freqs > self.tone + self.bandwidth)
+        noise_floor = np.mean(mags[mask]) if any(mask) else 0.1
+
+        # Validation Logic
+        # 1. Frequency must be within tight bandwidth
+        freq_match = abs(peak_freq - self.tone) < (self.bandwidth / 2)
+        # 2. Magnitude must be significantly above noise floor (SNR)
+        signal_strength = peak_mag > (noise_floor + self.sensitivity)
+
+        if freq_match and signal_strength:
+            self.consecutive_hits += 1
+            LOG.debug(f"Match! Freq: {peak_freq:.2f}Hz, Hits: {self.consecutive_hits}")
+        else:
+            self.consecutive_hits = 0
+
+        # Trigger if sustain threshold met
+        if self.consecutive_hits >= self.required_consecutive:
+            if not self.alarm_active:
+                LOG.info(f"Doorbell Detected: {peak_freq:.2f}Hz")
+                self.alarm_event.set()
+                self.alarm_active = True
+                # Reset hits to prevent immediate re-triggering
+                self.consecutive_hits = 0
+        else:
+            # Simple cool-down to reset alarm state
+            if self.alarm_active and self.consecutive_hits == 0:
+                self.alarm_active = False
 
 def parse_args():
     parser = argparse.ArgumentParser('Doobell Detector')
