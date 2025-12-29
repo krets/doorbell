@@ -1,0 +1,11 @@
+[Unit]
+Description=Doorbell Detection Service
+After=network.target
+
+[Service]
+WorkingDirectory=/root/doorbell
+ExecStart=/usr/bin/python3 /root/doorbell/doorbell_detection.py -v
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
